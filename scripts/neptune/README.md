@@ -51,3 +51,20 @@ Build the viogpu3d KMD + Neptune UMD (ARM64X) from `osy/kvm-guest-drivers-window
 
 * Occasional `hvf_vcpu_exec` assertion in QEMU under heavy load (not investigated yet).
 * Some newer optional DXMT exports (e.g. `dxmt_shared_handle_close`) are not used by the UMD yet.
+
+## Extra patches (scripts/neptune/patches)
+
+* `qemu-hvf-no-isv-data-abort.patch` (apply to utmapp/qemu `utm-edition`): a guest data
+  abort without a valid instruction syndrome (LDP/STP or SIMD access to an address no RAM
+  backs, e.g. a GPU host-memory BAR page that is not mapped yet) used to hit
+  `assert(isv)` in `hvf_vcpu_exec` and kill the whole VM. It is now logged (with PC, VA, PA
+  and the memory region) and delivered to the guest as a synchronous external abort.
+* `virglrenderer-dxr.patch` (apply to utmapp/virglrenderer): host side of DirectX
+  Raytracing for Neptune — a `GET_SHADER_IDENTIFIER` COM transport command (shader
+  identifiers are opaque 32-byte host data the generated protocol cannot carry) and a
+  `CreateStateObject`/`AddToStateObject` override that relinks
+  `SUBOBJECT_TO_EXPORTS_ASSOCIATION` pointers the wire deep-copies. The matching guest
+  driver change lives in the Windows driver build (Triton UMD).
+
+Apply them in the dependency checkouts before `build_deps.sh`, e.g.
+`git -C build-macOS-arm64/virglrenderer.git apply scripts/neptune/patches/virglrenderer-dxr.patch`.

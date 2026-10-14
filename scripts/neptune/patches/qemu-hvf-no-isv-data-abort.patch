@@ -1,0 +1,47 @@
+diff --git a/target/arm/hvf/hvf.c b/target/arm/hvf/hvf.c
+index f187968787..74a8a72fda 100644
+--- a/target/arm/hvf/hvf.c
++++ b/target/arm/hvf/hvf.c
+@@ -2292,7 +2292,41 @@ run_again:
+             break;
+         }
+ 
+-        assert(isv);
++        if (!isv) {
++            /*
++             * No instruction syndrome (e.g. LDP/STP or SIMD access) to an
++             * address that is not backed by RAM, typically a host-memory BAR
++             * page that is not mapped (yet / any more).  We cannot emulate
++             * the access without decoding the instruction; aborting QEMU
++             * takes the whole VM down, so report it and deliver a
++             * synchronous external abort to the guest instead, which is what
++             * real hardware does for an access nobody claims.
++             */
++            MemoryRegionSection mrs = memory_region_find(
++                get_system_memory(), hvf_exit->exception.physical_address, 1);
++            hvf_sync_pstate(cpu);
++            int el = arm_current_el(env);
++            error_report_once("hvf: data abort without ISV: pc=0x%" PRIx64
++                              " va=0x%" PRIx64 " pa=0x%" PRIx64
++                              " %s el=%d region=%s (+0x%" HWADDR_PRIx ")",
++                              env->pc, hvf_exit->exception.virtual_address,
++                              hvf_exit->exception.physical_address,
++                              iswrite ? "write" : "read", el,
++                              mrs.mr ? memory_region_name(mrs.mr) : "none",
++                              mrs.offset_within_region);
++            warn_report("hvf: data abort without ISV at pa=0x%" PRIx64
++                        " (pc=0x%" PRIx64 ", %s, el %d); injecting external abort",
++                        hvf_exit->exception.physical_address, env->pc,
++                        iswrite ? "write" : "read", el);
++            if (mrs.mr) {
++                memory_region_unref(mrs.mr);
++            }
++            env->exception.vaddress = hvf_exit->exception.virtual_address;
++            hvf_raise_exception(cpu, EXCP_DATA_ABORT,
++                                syn_data_abort_no_iss(el == 1, 0, 1, 0, 0,
++                                                      iswrite, 0x10));
++            break;
++        }
+ 
+         if (iswrite) {
+             val = hvf_get_reg(cpu, srt);

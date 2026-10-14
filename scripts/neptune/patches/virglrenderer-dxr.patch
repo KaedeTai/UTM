@@ -1,0 +1,279 @@
+diff -ruN virgl-a/src/meson.build virgl-b/src/meson.build
+--- a/src/meson.build	2026-10-14 06:24:27.000000000 +0800
++++ b/src/meson.build	2026-10-15 03:41:27.781002345 +0800
+@@ -129,6 +129,7 @@
+    'neptune/npt_overrides_d3d12_device.c',
+    'neptune/npt_overrides_d3d12_fence.c',
+    'neptune/npt_overrides_d3d12_pso.c',
++   'neptune/npt_overrides_d3d12_raytracing.c',
+ ]
+ 
+ drm_sources = [
+diff -ruN virgl-a/src/neptune/neptune-protocol/npt_protocol_transport.h virgl-b/src/neptune/neptune-protocol/npt_protocol_transport.h
+--- a/src/neptune/neptune-protocol/npt_protocol_transport.h	2026-10-14 06:24:27.000000000 +0800
++++ b/src/neptune/neptune-protocol/npt_protocol_transport.h	2026-10-15 03:41:27.777542039 +0800
+@@ -195,6 +195,7 @@
+ 
+ #define NPT_TRANSPORT_COM_RELEASE         0u
+ #define NPT_TRANSPORT_COM_QUERY_INTERFACE 1u
++#define NPT_TRANSPORT_COM_GET_SHADER_IDENTIFIER 2u
+ 
+ /* Sent when the guest wrapper refcount hits zero.  object_id lives in
+  * header.object_id.  The payload names, for every OTHER ring of the
+@@ -227,6 +228,24 @@
+    uint64_t guest_id;
+ };
+ 
++/* DXR: ID3D12StateObjectProperties::GetShaderIdentifier.  The generated
++ * protocol cannot carry its untyped 32-byte answer, so it travels here.
++ * Synchronous.  header.object_id = an ID3D12StateObjectProperties guest
++ * id.  Followed by name_units UTF-16 code units (terminator included),
++ * zero-padded to a multiple of 8 bytes.  cmd_return is S_OK when the
++ * export exists, E_INVALIDARG when the host returned NULL. */
++#define NPT_SHADER_IDENTIFIER_SIZE 32u
++struct npt_cmd_com_get_shader_identifier {
++   struct npt_command_header header;
++   uint32_t name_units;
++   uint32_t pad;
++};
++
++struct npt_cmd_com_get_shader_identifier_reply {
++   struct npt_reply_header header;
++   uint8_t identifier[NPT_SHADER_IDENTIFIER_SIZE];
++};
++
+ struct npt_cmd_com_query_interface_reply {
+    struct npt_reply_header header;
+    /* The id the interface is registered under (guest_id when the
+diff -ruN virgl-a/src/neptune/npt_context.c virgl-b/src/neptune/npt_context.c
+--- a/src/neptune/npt_context.c	2026-10-14 06:24:27.000000000 +0800
++++ b/src/neptune/npt_context.c	2026-10-15 03:41:27.780392616 +0800
+@@ -150,6 +150,8 @@
+    d->id3d11device5_dispatch_overrides = &npt_id3d11device5_overrides;
+    d->id3d11fence_dispatch_overrides = &npt_id3d11fence_overrides;
+    d->id3d12device_dispatch_overrides = &npt_id3d12device_overrides;
++   d->id3d12device5_dispatch_overrides = &npt_id3d12device5_overrides;
++   d->id3d12device7_dispatch_overrides = &npt_id3d12device7_overrides;
+    d->id3d11devicecontext_dispatch_overrides = &npt_query_dc_overrides;
+    d->id3d11devicecontext4_dispatch_overrides = &npt_fence_dc4_overrides;
+    d->id3d12commandqueue_dispatch_overrides =
+diff -ruN virgl-a/src/neptune/npt_dispatch.c virgl-b/src/neptune/npt_dispatch.c
+--- a/src/neptune/npt_dispatch.c	2026-10-14 06:24:27.000000000 +0800
++++ b/src/neptune/npt_dispatch.c	2026-10-15 03:41:27.779263540 +0800
+@@ -362,6 +362,63 @@
+ }
+ 
+ static void
++npt_dispatch_com_get_shader_identifier(struct npt_context *ctx,
++                                       struct npt_cs_decoder *dec,
++                                       struct npt_cs_encoder *enc,
++                                       const struct npt_command_header *header)
++{
++   struct npt_cmd_com_get_shader_identifier cmd;
++   cmd.header = *header;
++   npt_cs_decoder_read(dec, sizeof(cmd) - sizeof(cmd.header),
++                       &cmd.name_units, sizeof(cmd) - sizeof(cmd.header));
++   if (npt_cs_decoder_get_fatal(dec))
++      return;
++   const uint32_t units = cmd.name_units;
++   if (!units || units > 4096) {
++      npt_cs_decoder_set_fatal(dec);
++      return;
++   }
++   const size_t padded = ((size_t)units * 2 + 7) & ~(size_t)7;
++   uint16_t *name = calloc(1, padded);
++   if (!name) {
++      npt_cs_decoder_set_fatal(dec);
++      return;
++   }
++   npt_cs_decoder_read(dec, padded, name, padded);
++   if (npt_cs_decoder_get_fatal(dec)) {
++      free(name);
++      return;
++   }
++   name[units - 1] = 0;
++
++   struct npt_cmd_com_get_shader_identifier_reply reply;
++   memset(&reply, 0, sizeof(reply));
++   HRESULT hr = NPT_E_INVALIDARG;
++   void *props = npt_context_lookup_object(
++      ctx, dec, header->object_id, NPT_OBJECT_TYPE_ID3D12STATEOBJECTPROPERTIES);
++   if (props) {
++      typedef void *(NPT_STDMETHODCALLTYPE *PFN_GetShaderIdentifier)(void *, const WCHAR *);
++      void **vtbl = *(void ***)props;
++      PFN_GetShaderIdentifier fn =
++         (PFN_GetShaderIdentifier)vtbl[NPT_VTBL_ID3D12StateObjectProperties_GetShaderIdentifier];
++      const void *id = fn(props, (const WCHAR *)name);
++      if (id) {
++         memcpy(reply.identifier, id, NPT_SHADER_IDENTIFIER_SIZE);
++         hr = NPT_S_OK;
++      }
++   }
++   free(name);
++   reply.header.cmd_type = header->cmd_type;
++   reply.header.cmd_return = (uint32_t)hr;
++   if (header->cmd_flags & NPT_CMD_FLAG_REPLY) {
++      if (npt_cs_encoder_acquire(enc)) {
++         npt_cs_encoder_write(enc, sizeof(reply), &reply, sizeof(reply));
++         npt_cs_encoder_release(enc);
++      }
++   }
++}
++
++static void
+ npt_dispatch_map_resource(struct npt_context *ctx,
+                           struct npt_cs_decoder *dec,
+                           struct npt_cs_encoder *enc,
+@@ -680,6 +737,9 @@
+    case NPT_TRANSPORT_COM_QUERY_INTERFACE:
+       npt_dispatch_com_query_interface(ctx, dec, enc, header);
+       return true;
++   case NPT_TRANSPORT_COM_GET_SHADER_IDENTIFIER:
++      npt_dispatch_com_get_shader_identifier(ctx, dec, enc, header);
++      return true;
+    default:
+       return false;
+    }
+diff -ruN virgl-a/src/neptune/npt_overrides.h virgl-b/src/neptune/npt_overrides.h
+--- a/src/neptune/npt_overrides.h	2026-10-14 06:24:27.000000000 +0800
++++ b/src/neptune/npt_overrides.h	2026-10-15 03:41:27.779759794 +0800
+@@ -33,6 +33,12 @@
+    struct npt_command_ID3D12Device_CreateGraphicsPipelineState *args,
+    PFN_ID3D12Device_CreateGraphicsPipelineState original);
+ 
++/* DXR state objects (npt_overrides_d3d12_raytracing.c): the wire deep-copies
++ * SUBOBJECT_TO_EXPORTS_ASSOCIATION.pSubobjectToAssociate, so it is relinked
++ * to the decoded subobject array before the backend sees the desc. */
++extern struct npt_dispatch_id3d12device5_overrides npt_id3d12device5_overrides;
++extern struct npt_dispatch_id3d12device7_overrides npt_id3d12device7_overrides;
++
+ /* Hooks Begin/End on the immediate context to maintain the per-query
+  * pending list. */
+ extern struct npt_dispatch_id3d11devicecontext_overrides
+diff -ruN virgl-a/src/neptune/npt_overrides_d3d12_raytracing.c virgl-b/src/neptune/npt_overrides_d3d12_raytracing.c
+--- a/src/neptune/npt_overrides_d3d12_raytracing.c	1970-01-01 08:00:00.000000000 +0800
++++ b/src/neptune/npt_overrides_d3d12_raytracing.c	2026-10-15 03:42:10.308111375 +0800
+@@ -0,0 +1,123 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: MIT
++ *
++ * DXR state-object dispatch overrides.
++ *
++ * D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION names the subobject it associates by
++ * POINTER into the same D3D12_STATE_OBJECT_DESC's subobject array, and the
++ * runtime (and D3DMetal) resolve it by pointer identity.  The wire carries
++ * the pointee as a deep copy, so after decoding the pointer names a private
++ * copy that is not an element of pSubobjects and every association silently
++ * resolves to nothing (local root signatures and shader configs lost).
++ *
++ * Relink each association to the decoded subobject whose type and desc
++ * contents equal the copy's.  Desc contents are value types after decoding
++ * (interface pointers are already the host objects), so equal contents mean
++ * the same subobject; two identical candidates are interchangeable.
++ */
++
++#include <string.h>
++
++#include "npt_common.h"
++#include "npt_overrides.h"
++
++#include "neptune-protocol/npt_protocol_defs.h"
++#include "neptune-protocol/npt_protocol_host_id3d12device.h"
++
++/* Bytes of a subobject desc that identify it, by subobject type.  0: not
++ * an association target the guest emits (libraries, collections, hit
++ * groups, associations), compared by pointer only. */
++static size_t
++npt_subobject_desc_size(D3D12_STATE_SUBOBJECT_TYPE type)
++{
++   switch (type) {
++   case D3D12_STATE_SUBOBJECT_TYPE_STATE_OBJECT_CONFIG:
++      return sizeof(D3D12_STATE_OBJECT_CONFIG);
++   case D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE:
++      return sizeof(D3D12_GLOBAL_ROOT_SIGNATURE);
++   case D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE:
++      return sizeof(D3D12_LOCAL_ROOT_SIGNATURE);
++   case D3D12_STATE_SUBOBJECT_TYPE_NODE_MASK:
++      return sizeof(D3D12_NODE_MASK);
++   case D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG:
++      return sizeof(D3D12_RAYTRACING_SHADER_CONFIG);
++   case D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG:
++      return sizeof(D3D12_RAYTRACING_PIPELINE_CONFIG);
++   case D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG1:
++      return sizeof(D3D12_RAYTRACING_PIPELINE_CONFIG1);
++   default:
++      return 0;
++   }
++}
++
++static void
++npt_relink_associations(const D3D12_STATE_OBJECT_DESC *desc)
++{
++   if (!desc || !desc->pSubobjects)
++      return;
++   D3D12_STATE_SUBOBJECT *subs = (D3D12_STATE_SUBOBJECT *)desc->pSubobjects;
++   for (UINT i = 0; i < desc->NumSubobjects; i++) {
++      if (subs[i].Type != D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION ||
++          !subs[i].pDesc)
++         continue;
++      D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION *a =
++         (D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION *)subs[i].pDesc;
++      const D3D12_STATE_SUBOBJECT *copy = a->pSubobjectToAssociate;
++      if (!copy)
++         continue;
++      /* Already an element of the array: nothing to do. */
++      if (copy >= subs && copy < subs + desc->NumSubobjects)
++         continue;
++      const size_t sz = npt_subobject_desc_size(copy->Type);
++      const D3D12_STATE_SUBOBJECT *match = NULL;
++      for (UINT j = 0; j < desc->NumSubobjects && !match; j++) {
++         if (subs[j].Type != copy->Type)
++            continue;
++         if (subs[j].pDesc == copy->pDesc ||
++             (sz && subs[j].pDesc && copy->pDesc &&
++              !memcmp(subs[j].pDesc, copy->pDesc, sz)))
++            match = &subs[j];
++      }
++      if (match)
++         a->pSubobjectToAssociate = match;
++      else
++         npt_log("CreateStateObject: association %u (subobject type %u) has no "
++                 "matching subobject; left unlinked", i, (unsigned)copy->Type);
++   }
++}
++
++static HRESULT
++npt_override_ID3D12Device5_CreateStateObject(
++   UNUSED struct npt_dispatch_context *ctx,
++   struct npt_command_ID3D12Device5_CreateStateObject *args,
++   PFN_ID3D12Device5_CreateStateObject original)
++{
++   npt_relink_associations(args->pDesc);
++   args->ret = original(args->_self, args->pDesc, args->riid, args->ppStateObject);
++   if (args->ret < 0)
++      npt_log("CreateStateObject(type %u, %u subobjects) FAILED 0x%08x",
++              args->pDesc ? (unsigned)args->pDesc->Type : 0u,
++              args->pDesc ? args->pDesc->NumSubobjects : 0u, (unsigned)args->ret);
++   return args->ret;
++}
++
++static HRESULT
++npt_override_ID3D12Device7_AddToStateObject(
++   UNUSED struct npt_dispatch_context *ctx,
++   struct npt_command_ID3D12Device7_AddToStateObject *args,
++   PFN_ID3D12Device7_AddToStateObject original)
++{
++   npt_relink_associations(args->pAddition);
++   args->ret = original(args->_self, args->pAddition, args->pStateObjectToGrowFrom,
++                        args->riid, args->ppNewStateObject);
++   return args->ret;
++}
++
++struct npt_dispatch_id3d12device5_overrides npt_id3d12device5_overrides = {
++   .CreateStateObject = npt_override_ID3D12Device5_CreateStateObject,
++};
++
++struct npt_dispatch_id3d12device7_overrides npt_id3d12device7_overrides = {
++   .AddToStateObject = npt_override_ID3D12Device7_AddToStateObject,
++};
