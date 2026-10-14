@@ -71,3 +71,6 @@ build*/
 sysroot*/
 .DS_Store
 CodeSigning.xcconfig
+
+# Neptune helper script outputs
+out-neptune*/
