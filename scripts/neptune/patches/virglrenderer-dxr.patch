@@ -1,7 +1,8 @@
-diff -ruN virgl-a/src/meson.build virgl-b/src/meson.build
---- a/src/meson.build	2026-10-14 06:24:27.000000000 +0800
-+++ b/src/meson.build	2026-10-15 03:41:27.781002345 +0800
-@@ -129,6 +129,7 @@
+diff --git virgl-a/src/meson.build virgl-b/src/meson.build
+index 6bcc730..2260a0b 100644
+--- virgl-a/src/meson.build
++++ virgl-b/src/meson.build
+@@ -129,6 +129,7 @@ neptune_sources = [
     'neptune/npt_overrides_d3d12_device.c',
     'neptune/npt_overrides_d3d12_fence.c',
     'neptune/npt_overrides_d3d12_pso.c',
@@ -9,10 +10,11 @@ diff -ruN virgl-a/src/meson.build virgl-b/src/meson.build
  ]
  
  drm_sources = [
-diff -ruN virgl-a/src/neptune/neptune-protocol/npt_protocol_transport.h virgl-b/src/neptune/neptune-protocol/npt_protocol_transport.h
---- a/src/neptune/neptune-protocol/npt_protocol_transport.h	2026-10-14 06:24:27.000000000 +0800
-+++ b/src/neptune/neptune-protocol/npt_protocol_transport.h	2026-10-15 03:41:27.777542039 +0800
-@@ -195,6 +195,7 @@
+diff --git virgl-a/src/neptune/neptune-protocol/npt_protocol_transport.h virgl-b/src/neptune/neptune-protocol/npt_protocol_transport.h
+index 4a3200c..8aa8c52 100644
+--- virgl-a/src/neptune/neptune-protocol/npt_protocol_transport.h
++++ virgl-b/src/neptune/neptune-protocol/npt_protocol_transport.h
+@@ -195,6 +195,7 @@ struct npt_cmd_wait_virtqueue_seqno {
  
  #define NPT_TRANSPORT_COM_RELEASE         0u
  #define NPT_TRANSPORT_COM_QUERY_INTERFACE 1u
@@ -20,7 +22,7 @@ diff -ruN virgl-a/src/neptune/neptune-protocol/npt_protocol_transport.h virgl-b/
  
  /* Sent when the guest wrapper refcount hits zero.  object_id lives in
   * header.object_id.  The payload names, for every OTHER ring of the
-@@ -227,6 +228,24 @@
+@@ -227,6 +228,24 @@ struct npt_cmd_com_query_interface {
     uint64_t guest_id;
  };
  
@@ -45,10 +47,45 @@ diff -ruN virgl-a/src/neptune/neptune-protocol/npt_protocol_transport.h virgl-b/
  struct npt_cmd_com_query_interface_reply {
     struct npt_reply_header header;
     /* The id the interface is registered under (guest_id when the
-diff -ruN virgl-a/src/neptune/npt_context.c virgl-b/src/neptune/npt_context.c
---- a/src/neptune/npt_context.c	2026-10-14 06:24:27.000000000 +0800
-+++ b/src/neptune/npt_context.c	2026-10-15 03:41:27.780392616 +0800
-@@ -150,6 +150,8 @@
+diff --git virgl-a/src/neptune/npt_common.c virgl-b/src/neptune/npt_common.c
+index f8f0c8a..177009d 100644
+--- virgl-a/src/neptune/npt_common.c
++++ virgl-b/src/neptune/npt_common.c
+@@ -6,6 +6,10 @@
+ #include "npt_common.h"
+ 
+ #include <stdarg.h>
++#include <stdio.h>
++#ifdef __APPLE__
++#include <os/log.h>
++#endif
+ 
+ #include "util/u_debug.h"
+ 
+@@ -58,6 +62,18 @@ npt_log(const char *fmt, ...)
+ {
+    va_list va;
+    va_start(va, fmt);
++#ifdef __APPLE__
++   /* Mirror to the unified log: the render worker's stderr only reaches the
++    * VM's debug log inside UTM's sandbox container; `log show` can read this. */
++   {
++      char buf[1024];
++      va_list vb;
++      va_copy(vb, va);
++      vsnprintf(buf, sizeof(buf), fmt, vb);
++      va_end(vb);
++      os_log(OS_LOG_DEFAULT, "npt: %{public}s", buf);
++   }
++#endif
+    virgl_prefixed_logv("npt", VIRGL_LOG_LEVEL_INFO, fmt, va);
+    va_end(va);
+ }
+diff --git virgl-a/src/neptune/npt_context.c virgl-b/src/neptune/npt_context.c
+index 62881f4..1693848 100644
+--- virgl-a/src/neptune/npt_context.c
++++ virgl-b/src/neptune/npt_context.c
+@@ -150,6 +150,8 @@ npt_context_init_dispatch(struct npt_context *ctx)
     d->id3d11device5_dispatch_overrides = &npt_id3d11device5_overrides;
     d->id3d11fence_dispatch_overrides = &npt_id3d11fence_overrides;
     d->id3d12device_dispatch_overrides = &npt_id3d12device_overrides;
@@ -57,13 +94,15 @@ diff -ruN virgl-a/src/neptune/npt_context.c virgl-b/src/neptune/npt_context.c
     d->id3d11devicecontext_dispatch_overrides = &npt_query_dc_overrides;
     d->id3d11devicecontext4_dispatch_overrides = &npt_fence_dc4_overrides;
     d->id3d12commandqueue_dispatch_overrides =
-diff -ruN virgl-a/src/neptune/npt_dispatch.c virgl-b/src/neptune/npt_dispatch.c
---- a/src/neptune/npt_dispatch.c	2026-10-14 06:24:27.000000000 +0800
-+++ b/src/neptune/npt_dispatch.c	2026-10-15 03:41:27.779263540 +0800
-@@ -362,6 +362,63 @@
+diff --git virgl-a/src/neptune/npt_dispatch.c virgl-b/src/neptune/npt_dispatch.c
+index 0ac935f..52bfdb1 100644
+--- virgl-a/src/neptune/npt_dispatch.c
++++ virgl-b/src/neptune/npt_dispatch.c
+@@ -361,6 +361,63 @@ npt_dispatch_com_query_interface(struct npt_context *ctx,
+    }
  }
  
- static void
++static void
 +npt_dispatch_com_get_shader_identifier(struct npt_context *ctx,
 +                                       struct npt_cs_decoder *dec,
 +                                       struct npt_cs_encoder *enc,
@@ -120,11 +159,10 @@ diff -ruN virgl-a/src/neptune/npt_dispatch.c virgl-b/src/neptune/npt_dispatch.c
 +   }
 +}
 +
-+static void
+ static void
  npt_dispatch_map_resource(struct npt_context *ctx,
                            struct npt_cs_decoder *dec,
-                           struct npt_cs_encoder *enc,
-@@ -680,6 +737,9 @@
+@@ -680,6 +737,9 @@ npt_dispatch_subgroup_com(struct npt_context *ctx,
     case NPT_TRANSPORT_COM_QUERY_INTERFACE:
        npt_dispatch_com_query_interface(ctx, dec, enc, header);
        return true;
@@ -134,10 +172,11 @@ diff -ruN virgl-a/src/neptune/npt_dispatch.c virgl-b/src/neptune/npt_dispatch.c
     default:
        return false;
     }
-diff -ruN virgl-a/src/neptune/npt_overrides.h virgl-b/src/neptune/npt_overrides.h
---- a/src/neptune/npt_overrides.h	2026-10-14 06:24:27.000000000 +0800
-+++ b/src/neptune/npt_overrides.h	2026-10-15 03:41:27.779759794 +0800
-@@ -33,6 +33,12 @@
+diff --git virgl-a/src/neptune/npt_overrides.h virgl-b/src/neptune/npt_overrides.h
+index c1573ea..463ab29 100644
+--- virgl-a/src/neptune/npt_overrides.h
++++ virgl-b/src/neptune/npt_overrides.h
+@@ -33,6 +33,12 @@ npt_override_ID3D12Device_CreateGraphicsPipelineState(
     struct npt_command_ID3D12Device_CreateGraphicsPipelineState *args,
     PFN_ID3D12Device_CreateGraphicsPipelineState original);
  
@@ -150,10 +189,12 @@ diff -ruN virgl-a/src/neptune/npt_overrides.h virgl-b/src/neptune/npt_overrides.
  /* Hooks Begin/End on the immediate context to maintain the per-query
   * pending list. */
  extern struct npt_dispatch_id3d11devicecontext_overrides
-diff -ruN virgl-a/src/neptune/npt_overrides_d3d12_raytracing.c virgl-b/src/neptune/npt_overrides_d3d12_raytracing.c
---- a/src/neptune/npt_overrides_d3d12_raytracing.c	1970-01-01 08:00:00.000000000 +0800
-+++ b/src/neptune/npt_overrides_d3d12_raytracing.c	2026-10-15 03:42:10.308111375 +0800
-@@ -0,0 +1,123 @@
+diff --git virgl-a/src/neptune/npt_overrides_d3d12_raytracing.c virgl-b/src/neptune/npt_overrides_d3d12_raytracing.c
+new file mode 100644
+index 0000000..bc0636d
+--- /dev/null
++++ virgl-b/src/neptune/npt_overrides_d3d12_raytracing.c
+@@ -0,0 +1,254 @@
 +/*
 + * Copyright 2026 Turing Software LLC
 + * SPDX-License-Identifier: MIT
@@ -243,6 +284,123 @@ diff -ruN virgl-a/src/neptune/npt_overrides_d3d12_raytracing.c virgl-b/src/neptu
 +   }
 +}
 +
++/* Wide (UTF-16) name to a short printable ASCII string for logging. */
++static const char *
++npt_w16(const WCHAR *w, char *buf, size_t n)
++{
++   size_t i = 0;
++   if (!w)
++      return "(null)";
++   for (; i + 1 < n && w[i]; i++)
++      buf[i] = (w[i] >= 0x20 && w[i] < 0x7f) ? (char)w[i] : '?';
++   buf[i] = 0;
++   return buf;
++}
++
++static void
++npt_dump_state_object(const char *what, const D3D12_STATE_OBJECT_DESC *d)
++{
++   char a[96], b[96];
++   if (!d) {
++      npt_log("%s: desc NULL", what);
++      return;
++   }
++   npt_log("%s: type %u, %u subobjects at %p", what, (unsigned)d->Type,
++           d->NumSubobjects, (const void *)d->pSubobjects);
++   for (UINT i = 0; d->pSubobjects && i < d->NumSubobjects; i++) {
++      const D3D12_STATE_SUBOBJECT *s = &d->pSubobjects[i];
++      const void *p = s->pDesc;
++      npt_log("  [%u] type %u pDesc %p", i, (unsigned)s->Type, p);
++      if (!p)
++         continue;
++      switch (s->Type) {
++      case D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY: {
++         const D3D12_DXIL_LIBRARY_DESC *l = p;
++         npt_log("      lib bytecode %p len %zu, %u exports at %p",
++                 l->DXILLibrary.pShaderBytecode, (size_t)l->DXILLibrary.BytecodeLength,
++                 l->NumExports, (const void *)l->pExports);
++         for (UINT e = 0; l->pExports && e < l->NumExports; e++)
++            npt_log("      export '%s' rename '%s' flags 0x%x",
++                    npt_w16(l->pExports[e].Name, a, sizeof(a)),
++                    npt_w16(l->pExports[e].ExportToRename, b, sizeof(b)),
++                    (unsigned)l->pExports[e].Flags);
++         break;
++      }
++      case D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP: {
++         const D3D12_HIT_GROUP_DESC *h = p;
++         npt_log("      hitgroup '%s' type %u closest '%s'",
++                 npt_w16(h->HitGroupExport, a, sizeof(a)), (unsigned)h->Type,
++                 npt_w16(h->ClosestHitShaderImport, b, sizeof(b)));
++         break;
++      }
++      case D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG: {
++         const D3D12_RAYTRACING_SHADER_CONFIG *c = p;
++         npt_log("      shader config payload %u attr %u",
++                 c->MaxPayloadSizeInBytes, c->MaxAttributeSizeInBytes);
++         break;
++      }
++      case D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG: {
++         const D3D12_RAYTRACING_PIPELINE_CONFIG *c = p;
++         npt_log("      pipeline config depth %u", c->MaxTraceRecursionDepth);
++         break;
++      }
++      case D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE:
++      case D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE:
++         npt_log("      root signature %p", *(void *const *)p);
++         break;
++      case D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION: {
++         const D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION *x = p;
++         const D3D12_STATE_SUBOBJECT *t = x->pSubobjectToAssociate;
++         long idx = (t >= d->pSubobjects && t < d->pSubobjects + d->NumSubobjects)
++                       ? (long)(t - d->pSubobjects) : -1;
++         npt_log("      assoc -> %p (index %ld, type %d), %u exports",
++                 (const void *)t, idx, t ? (int)t->Type : -1, x->NumExports);
++         for (UINT e = 0; x->pExports && e < x->NumExports; e++)
++            npt_log("      assoc export '%s'", npt_w16(x->pExports[e], a, sizeof(a)));
++         break;
++      }
++      default:
++         break;
++      }
++   }
++}
++
++/* D3DMetal reads a DXIL library's RDAT part to find its functions and
++ * crashes (NULL deref in CreateDXILContainer) when it is missing -- e.g.
++ * when a guest driver forwards only the DXIL program part.  Refuse such a
++ * desc instead of taking the whole render server down. */
++static bool
++npt_libraries_have_rdat(const D3D12_STATE_OBJECT_DESC *d)
++{
++   if (!d)
++      return true;
++   for (UINT i = 0; i < d->NumSubobjects; i++) {
++      const D3D12_STATE_SUBOBJECT *so = &d->pSubobjects[i];
++      if (so->Type != D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY || !so->pDesc)
++         continue;
++      const D3D12_DXIL_LIBRARY_DESC *lib = so->pDesc;
++      const uint8_t *b = lib->DXILLibrary.pShaderBytecode;
++      const size_t cb = lib->DXILLibrary.BytecodeLength;
++      bool found = false;
++      if (b && cb >= 32 && memcmp(b, "DXBC", 4) == 0) {
++         uint32_t n;
++         memcpy(&n, b + 28, 4);
++         for (uint32_t k = 0; k < n && 32 + 4 * (size_t)k + 4 <= cb; k++) {
++            uint32_t off;
++            memcpy(&off, b + 32 + 4 * k, 4);
++            if ((size_t)off + 4 <= cb && memcmp(b + off, "RDAT", 4) == 0)
++               found = true;
++         }
++      }
++      if (!found) {
++         npt_log("CreateStateObject: DXIL library %u (%zu bytes) has no RDAT "
++                 "part; refusing it (D3DMetal would crash)", i, cb);
++         return false;
++      }
++   }
++   return true;
++}
++
 +static HRESULT
 +npt_override_ID3D12Device5_CreateStateObject(
 +   UNUSED struct npt_dispatch_context *ctx,
@@ -250,7 +408,15 @@ diff -ruN virgl-a/src/neptune/npt_overrides_d3d12_raytracing.c virgl-b/src/neptu
 +   PFN_ID3D12Device5_CreateStateObject original)
 +{
 +   npt_relink_associations(args->pDesc);
++   npt_dump_state_object("CreateStateObject", args->pDesc);
++   if (!npt_libraries_have_rdat(args->pDesc)) {
++      if (args->ppStateObject)
++         *args->ppStateObject = NULL;
++      args->ret = (HRESULT)0x80070057; /* E_INVALIDARG */
++      return args->ret;
++   }
 +   args->ret = original(args->_self, args->pDesc, args->riid, args->ppStateObject);
++   npt_log("CreateStateObject -> 0x%08x", (unsigned)args->ret);
 +   if (args->ret < 0)
 +      npt_log("CreateStateObject(type %u, %u subobjects) FAILED 0x%08x",
 +              args->pDesc ? (unsigned)args->pDesc->Type : 0u,
@@ -265,6 +431,12 @@ diff -ruN virgl-a/src/neptune/npt_overrides_d3d12_raytracing.c virgl-b/src/neptu
 +   PFN_ID3D12Device7_AddToStateObject original)
 +{
 +   npt_relink_associations(args->pAddition);
++   if (!npt_libraries_have_rdat(args->pAddition)) {
++      if (args->ppNewStateObject)
++         *args->ppNewStateObject = NULL;
++      args->ret = (HRESULT)0x80070057; /* E_INVALIDARG */
++      return args->ret;
++   }
 +   args->ret = original(args->_self, args->pAddition, args->pStateObjectToGrowFrom,
 +                        args->riid, args->ppNewStateObject);
 +   return args->ret;
